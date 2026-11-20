@@ -1,0 +1,88 @@
+name: Test ve Windows kurulumu
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Testler
+        run: python -m unittest discover -s tests -v
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Araçlar
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nsis
+          python -m pip install --quiet pefile
+      - name: Kurulum dosyasını derle
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then export VERSION="${GITHUB_REF_NAME#v}"; fi
+          bash scripts/build_windows_installer.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-kurulum
+          path: build/OBS-Stream-Doctor-Kurulum-*.exe
+
+  smoke-windows:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-kurulum
+          path: dist
+      - name: Sessiz kurulum ve paketlenmiş Python kontrolü
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist\*.exe | Select-Object -First 1
+          Start-Process -FilePath $exe.FullName -ArgumentList "/S" -Wait
+          $app = Join-Path $env:LOCALAPPDATA "OBSStreamDoctor"
+          $py = Join-Path $app "python\python.exe"
+          if (-not (Test-Path $py)) { throw "python.exe kurulmamış" }
+          & $py -I -X utf8 -c "import ctypes, socket, hashlib, json, psutil, http.server; print('importlar tamam', psutil.__version__)"
+          if ($LASTEXITCODE -ne 0) { throw "import hatası" }
+          & $py -I -X utf8 -c "import sys; sys.path.insert(0, r'$app'); import obs_stream_doctor as o; assert o._win_icmp, 'ICMP API yok'; print('ping 127.0.0.1:', o.icmp_ping('127.0.0.1', 1.0)); print('wifi:', o.wifi_info()); print('net:', o.net_bytes()); print('gateway:', o.default_gateway())"
+          if ($LASTEXITCODE -ne 0) { throw "çalışma zamanı hatası" }
+          Copy-Item tests -Destination $app -Recurse
+          & $py -I -X utf8 -m unittest discover -s (Join-Path $app "tests") -t $app -v
+          if ($LASTEXITCODE -ne 0) { throw "paketlenmiş Python ile testler başarısız" }
+          if (-not (Test-Path (Join-Path ([Environment]::GetFolderPath('Desktop')) "OBS Stream Doctor.lnk"))) { throw "masaüstü kısayolu yok" }
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: smoke-windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-kurulum
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+          generate_release_notes: true

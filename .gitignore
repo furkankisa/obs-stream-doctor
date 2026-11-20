@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.exe
+yayin_loglari/
+OBS Stream Doctor Raporları/
+.DS_Store
